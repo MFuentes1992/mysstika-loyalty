@@ -1,0 +1,13 @@
+[
+  {"email":"ana@example.com","firstName":"Ana","birthDay":"1990-10-03","createdAt":"2026-01-10T10:00:00Z","welcomeEmail":true,"stamps":10,"lastPunch":"2026-10-01T12:00:00Z"},
+  {"email":"beto@example.com","firstName":"Beto","birthDay":"1985-03-21","createdAt":"2026-02-11T09:30:00Z","welcomeEmail":true,"stamps":9,"lastPunch":"2026-08-20T18:00:00Z"},
+  {"email":"carla@example.com","firstName":"Carla","birthDay":"2000-10-31","createdAt":"2026-03-05T15:00:00Z","welcomeEmail":false,"stamps":8,"lastPunch":"2026-09-30T11:00:00Z"},
+  {"email":"dani@example.com","firstName":"Dani","birthDay":"1999-12-01","createdAt":"2026-04-01T08:00:00Z","welcomeEmail":true,"stamps":7,"lastPunch":"2026-09-03T11:59:59Z"},
+  {"email":"elena@example.com","firstName":"Elena","birthDay":"1995-07-14","createdAt":"2026-05-20T20:00:00Z","welcomeEmail":true,"stamps":5,"lastPunch":"2026-09-03T12:00:01Z"},
+  {"email":"fer@example.com","firstName":"Fer","birthDay":"2001-01-09","createdAt":"2026-06-02T07:00:00Z","welcomeEmail":true,"stamps":4,"lastPunch":"2026-10-17T09:00:00Z"},
+  {"email":"gabi@example.com","firstName":"Gabi","birthDay":"","createdAt":"2026-09-18T12:00:00Z","welcomeEmail":true,"stamps":0,"lastPunch":""},
+  {"email":"hugo@example.com","firstName":"Hugo","birthDay":"1980-10-18","createdAt":"2026-09-18T12:00:01Z","welcomeEmail":false,"stamps":0,"lastPunch":""},
+  {"email":"ines@example.com","firstName":"Ines","birthDay":"1992-11-30","createdAt":"2026-10-15T22:30:07Z","welcomeEmail":true,"stamps":1,"lastPunch":"2026-10-15T22:30:14Z"},
+  {"email":"juan@example.com","firstName":"Juan","birthDay":"1970-10","createdAt":"2026-07-07T07:07:07Z","welcomeEmail":true,"stamps":12,"lastPunch":"2026-06-01T00:00:00Z"},
+  {"email":"kim@example.com","firstName":"Kim","birthDay":"1993-08-08","createdAt":"2026-01-01T00:00:00Z","stamps":3,"lastPunch":"2026-10-10T10:10:10Z"}
+]

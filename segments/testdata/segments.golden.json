@@ -1,0 +1,125 @@
+{
+  "total": 11,
+  "reward_ready": [
+    {
+      "email": "ana@example.com",
+      "firstName": "Ana",
+      "stamps": 10,
+      "lastPunch": "2026-10-01T12:00:00Z"
+    },
+    {
+      "email": "juan@example.com",
+      "firstName": "Juan",
+      "stamps": 12,
+      "lastPunch": "2026-06-01T00:00:00Z"
+    }
+  ],
+  "near_reward": [
+    {
+      "email": "beto@example.com",
+      "firstName": "Beto",
+      "stamps": 9,
+      "lastPunch": "2026-08-20T18:00:00Z"
+    },
+    {
+      "email": "carla@example.com",
+      "firstName": "Carla",
+      "stamps": 8,
+      "lastPunch": "2026-09-30T11:00:00Z"
+    }
+  ],
+  "mid_cycle": [
+    {
+      "email": "dani@example.com",
+      "firstName": "Dani",
+      "stamps": 7,
+      "lastPunch": "2026-09-03T11:59:59Z"
+    },
+    {
+      "email": "elena@example.com",
+      "firstName": "Elena",
+      "stamps": 5,
+      "lastPunch": "2026-09-03T12:00:01Z"
+    }
+  ],
+  "birthdays_this_month": [
+    {
+      "email": "ana@example.com",
+      "firstName": "Ana",
+      "birthDay": "1990-10-03"
+    },
+    {
+      "email": "carla@example.com",
+      "firstName": "Carla",
+      "birthDay": "2000-10-31"
+    },
+    {
+      "email": "juan@example.com",
+      "firstName": "Juan",
+      "birthDay": "1970-10"
+    },
+    {
+      "email": "hugo@example.com",
+      "firstName": "Hugo",
+      "birthDay": "1980-10-18"
+    }
+  ],
+  "new_last_30d": [
+    {
+      "email": "hugo@example.com",
+      "firstName": "Hugo",
+      "createdAt": "2026-09-18T12:00:01Z"
+    },
+    {
+      "email": "ines@example.com",
+      "firstName": "Ines",
+      "createdAt": "2026-10-15T22:30:07Z"
+    }
+  ],
+  "stale_45d": [
+    {
+      "email": "beto@example.com",
+      "firstName": "Beto",
+      "stamps": 9,
+      "lastPunch": "2026-08-20T18:00:00Z"
+    },
+    {
+      "email": "dani@example.com",
+      "firstName": "Dani",
+      "stamps": 7,
+      "lastPunch": "2026-09-03T11:59:59Z"
+    },
+    {
+      "email": "juan@example.com",
+      "firstName": "Juan",
+      "stamps": 12,
+      "lastPunch": "2026-06-01T00:00:00Z"
+    }
+  ],
+  "never_punched": [
+    {
+      "email": "gabi@example.com",
+      "firstName": "Gabi",
+      "createdAt": "2026-09-18T12:00:00Z"
+    },
+    {
+      "email": "hugo@example.com",
+      "firstName": "Hugo",
+      "createdAt": "2026-09-18T12:00:01Z"
+    }
+  ],
+  "missing_welcome": [
+    {
+      "email": "kim@example.com",
+      "firstName": "Kim"
+    },
+    {
+      "email": "carla@example.com",
+      "firstName": "Carla"
+    },
+    {
+      "email": "hugo@example.com",
+      "firstName": "Hugo"
+    }
+  ]
+}
