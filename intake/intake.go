@@ -13,24 +13,46 @@ import (
 	"time"
 	_ "time/tzdata" // America/Mexico_City on Lambda provided.al2023, which has no zoneinfo
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
 
-// ErrInvalidEmail is returned by NormalizeEmail for input that is not shaped
-// like local@domain.tld.
+// ErrInvalidEmail is returned by NormalizeEmail for input it does not accept.
 var ErrInvalidEmail = errors.New("intake: invalid email")
 
-// NormalizeEmail trims and lowercases s and checks it has the basic shape
-// local@domain.tld: one @, a non-empty local part, a domain of at least two
-// non-empty dot-separated labels, and no whitespace. It is not RFC 5322.
+const (
+	maxEmailLen   = 254
+	maxLocalLen   = 64
+	maxLabelLen   = 63
+	emailSpecials = `<>()[]\,;:"`
+)
+
+// NormalizeEmail trims and lowercases s and accepts it only when it is shaped
+// like local@domain.tld. It is deliberately stricter and simpler than RFC 5322:
+//
+//   - valid UTF-8, at most 254 bytes, exactly one @
+//   - no whitespace, control characters or any of <>()[]\,;:"
+//   - local part of 1–64 bytes with no leading, trailing or doubled dot
+//     (+ tags and inner dots are kept)
+//   - two or more domain labels of 1–63 ASCII letters, digits or hyphens, not
+//     starting or ending with a hyphen; the TLD is 2+ letters
 func NormalizeEmail(s string) (string, error) {
-	e := strings.ToLower(strings.TrimSpace(s))
-	if strings.IndexFunc(e, unicode.IsSpace) >= 0 || strings.Count(e, "@") != 1 {
+	if !utf8.ValidString(s) { // before ToLower, which turns invalid bytes into U+FFFD
 		return "", ErrInvalidEmail
 	}
+	e := strings.ToLower(strings.TrimSpace(s))
+	if e == "" || len(e) > maxEmailLen || strings.Count(e, "@") != 1 {
+		return "", ErrInvalidEmail
+	}
+	for _, r := range e {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune(emailSpecials, r) {
+			return "", ErrInvalidEmail
+		}
+	}
 	local, domain, _ := strings.Cut(e, "@")
-	if local == "" {
+	if local == "" || len(local) > maxLocalLen ||
+		local[0] == '.' || local[len(local)-1] == '.' || strings.Contains(local, "..") {
 		return "", ErrInvalidEmail
 	}
 	labels := strings.Split(domain, ".")
@@ -38,36 +60,80 @@ func NormalizeEmail(s string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 	for _, l := range labels {
-		if l == "" {
+		if !validLabel(l) {
+			return "", ErrInvalidEmail
+		}
+	}
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return "", ErrInvalidEmail
+	}
+	for i := 0; i < len(tld); i++ {
+		if tld[i] < 'a' || tld[i] > 'z' {
 			return "", ErrInvalidEmail
 		}
 	}
 	return e, nil
 }
 
-// MaxNameRunes caps a cleaned name, counted in runes before redaction.
-const MaxNameRunes = 50
+func validLabel(l string) bool {
+	if l == "" || len(l) > maxLabelLen || l[0] == '-' || l[len(l)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
 
-// Redacted replaces each blocked word in a name.
-const Redacted = "[redacted]"
+const (
+	// MaxRawNameRunes bounds the raw input before any processing.
+	MaxRawNameRunes = 200
+	// MaxNameRunes caps the cleaned name, after redaction.
+	MaxNameRunes = 50
+	// Redacted replaces each blocked word in a name.
+	Redacted = "[redacted]"
+)
 
-var htmlTag = regexp.MustCompile(`<[^>]*>`)
+// htmlTag is a tag start (< followed by a letter, / or !) up to the next > or,
+// for an unterminated tag, the end of the input.
+var htmlTag = regexp.MustCompile(`<[\p{L}/!][^>]*(?:>|$)`)
 
 // NameCleaner cleans names against a blocked-word list folded once.
 type NameCleaner struct {
 	blocked map[string]struct{}
+	skipped []string
 }
 
 // NewNameCleaner folds the blocked words (case and accents) once. Blank
-// entries are ignored; a nil list blocks nothing.
+// entries are ignored and a nil list blocks nothing. Only single-word entries
+// are used: an entry containing a separator (a space, hyphen, apostrophe,
+// digit or any other non-letter) can never match a word, so it is set aside
+// and reported by Skipped for the caller to log.
 func NewNameCleaner(blocked []string) *NameCleaner {
 	c := &NameCleaner{blocked: make(map[string]struct{}, len(blocked))}
 	for _, w := range blocked {
-		if f := fold(strings.TrimSpace(w)); f != "" {
-			c.blocked[f] = struct{}{}
+		w = strings.TrimSpace(w)
+		if w == "" {
+			continue
 		}
+		f := fold(w)
+		if strings.IndexFunc(f, isSeparator) >= 0 {
+			c.skipped = append(c.skipped, w)
+			continue
+		}
+		c.blocked[f] = struct{}{}
 	}
 	return c
+}
+
+// Skipped returns the trimmed blocked-list entries that were not used because
+// they are not a single word.
+func (c *NameCleaner) Skipped() []string {
+	return append([]string(nil), c.skipped...)
 }
 
 // CleanName is NewNameCleaner(blocked).Clean(s), for one-off calls.
@@ -75,19 +141,36 @@ func CleanName(s string, blocked []string) string {
 	return NewNameCleaner(blocked).Clean(s)
 }
 
-// Clean strips HTML tags and control characters, collapses whitespace into
-// single spaces, trims, caps the result at MaxNameRunes, and then replaces
-// every whole word matching a blocked word with Redacted.
+// Clean returns a display name of at most MaxNameRunes runes:
 //
-// Words are split on spaces, hyphens and apostrophes (' and ’), and the
-// separators are kept. Matching ignores case and accents; substrings never
-// match.
+//  1. drop invalid UTF-8 and keep the first MaxRawNameRunes runes;
+//  2. replace each HTML tag with a space (a tag starts at < followed by a
+//     letter, / or !, and an unterminated one runs to the end), so a lone < or
+//     > is kept; turn whitespace into spaces, drop control and format
+//     characters, collapse spaces and trim;
+//  3. replace every whole word that matches a blocked word with Redacted;
+//  4. cap at MaxNameRunes on a word boundary.
 //
-// The cap applies before redaction so the stored length depends only on what
-// the customer typed, not on the runtime list, and a Redacted marker is never
-// cut in half. A redacted name can therefore exceed MaxNameRunes.
+// A word is a run of letters and combining marks. Every other rune
+// (punctuation, digits, emoji, _, spaces, hyphens, apostrophes) separates
+// words and is kept, so "Ana-badword" is "Ana-[redacted]" and "badword!" is
+// "[redacted]!". Matching ignores case, compatibility forms (fullwidth
+// letters) and accents, but ñ stays distinct from n. Substrings never match.
+// Leetspeak ("b4dword") and splits inside a word ("bad_word") are out of
+// scope.
+//
+// The cap runs after redaction so the result always fits MaxNameRunes and a
+// Redacted marker is never split. It keeps whole words up to the last word
+// that fits; when not even the first word fits, it hard-cuts, but never inside
+// a Redacted marker.
+//
+// The result is not HTML-safe: escape it wherever it is rendered.
 func (c *NameCleaner) Clean(s string) string {
-	s = htmlTag.ReplaceAllString(s, "")
+	s = strings.ToValidUTF8(s, "")
+	if utf8.RuneCountInString(s) > MaxRawNameRunes {
+		s = string([]rune(s)[:MaxRawNameRunes])
+	}
+	s = htmlTag.ReplaceAllString(s, " ")
 	s = strings.Map(func(r rune) rune {
 		switch {
 		case unicode.IsSpace(r):
@@ -98,46 +181,99 @@ func (c *NameCleaner) Clean(s string) string {
 		return r
 	}, s)
 	s = strings.Join(strings.Fields(s), " ")
-	if r := []rune(s); len(r) > MaxNameRunes {
-		s = strings.TrimSpace(string(r[:MaxNameRunes]))
-	}
-	if len(c.blocked) == 0 {
-		return s
-	}
 
-	var b strings.Builder
+	toks := tokenize(s)
+	for i := range toks {
+		if toks[i].word {
+			if _, ok := c.blocked[fold(toks[i].text)]; ok {
+				toks[i].text, toks[i].redacted = Redacted, true
+			}
+		}
+	}
+	return capTokens(toks)
+}
+
+type token struct {
+	text           string
+	word, redacted bool
+}
+
+// tokenize splits s into alternating runs of word runes and separators.
+func tokenize(s string) []token {
+	var toks []token
 	start := 0
-	flush := func(end int) {
-		w := s[start:end]
-		if _, ok := c.blocked[fold(w)]; ok && w != "" {
-			w = Redacted
-		}
-		b.WriteString(w)
-	}
 	for i, r := range s {
-		if isWordSeparator(r) {
-			flush(i)
-			b.WriteRune(r)
-			start = i + len(string(r))
+		w := !isSeparator(r)
+		if i > start && w != toks[len(toks)-1].word {
+			toks[len(toks)-1].text = s[start:i]
+			start = i
+		}
+		if i == start {
+			toks = append(toks, token{word: w})
 		}
 	}
-	flush(len(s))
-	return b.String()
+	if len(toks) > 0 {
+		toks[len(toks)-1].text = s[start:]
+	}
+	return toks
 }
 
-func isWordSeparator(r rune) bool {
-	return r == ' ' || r == '-' || r == '\'' || r == '’'
-}
-
-// fold lowercases w and drops combining marks after NFD, so "Pendéjo" folds
-// to "pendejo" (and "ñ" to "n").
-func fold(w string) string {
-	return strings.ToLower(strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Mn, r) {
-			return -1
+func capTokens(toks []token) string {
+	total, lastWordEnd := 0, -1
+	for i, t := range toks {
+		total += utf8.RuneCountInString(t.text)
+		if t.word && total <= MaxNameRunes {
+			lastWordEnd = i
 		}
-		return r
-	}, norm.NFD.String(w)))
+	}
+	var b strings.Builder
+	if total <= MaxNameRunes {
+		for _, t := range toks {
+			b.WriteString(t.text)
+		}
+		return b.String()
+	}
+	if lastWordEnd >= 0 {
+		for _, t := range toks[:lastWordEnd+1] {
+			b.WriteString(t.text)
+		}
+		return b.String()
+	}
+	// Not even the first word fits: hard-cut, never inside Redacted.
+	left := MaxNameRunes
+	for _, t := range toks {
+		n := utf8.RuneCountInString(t.text)
+		if n <= left {
+			b.WriteString(t.text)
+			left -= n
+			continue
+		}
+		if !t.redacted {
+			b.WriteString(string([]rune(t.text)[:left]))
+		}
+		break
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func isSeparator(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsMark(r)
+}
+
+// fold lowercases w and, after NFKD, drops nonspacing marks except the tilde
+// of ñ, so "Zórglé" folds to "zorgle", "ｂａｄ" to "bad" and "Peña" to "peña"
+// (not "pena").
+func fold(w string) string {
+	var b strings.Builder
+	var prev rune
+	for _, r := range norm.NFKD.String(w) {
+		if unicode.Is(unicode.Mn, r) && !(r == '̃' && (prev == 'n' || prev == 'N')) {
+			continue
+		}
+		b.WriteRune(r)
+		prev = r
+	}
+	return norm.NFC.String(strings.ToLower(b.String()))
 }
 
 var campaignPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
@@ -169,10 +305,20 @@ func mustLoadLocation(name string) *time.Location {
 }
 
 // Adult reports whether someone born on dob is AdultAge or older on now's
-// date in America/Mexico_City. dob's calendar date is read as is (in its own
-// location; a date-only value parsed as UTC is the usual input). A Feb 29
-// birthday is reached on Mar 1 in non-leap years. A future dob is not adult.
+// date in America/Mexico_City. A Feb 29 birthday is reached on Mar 1 in
+// non-leap years.
+//
+// Pass dob as a date-only value (e.g. time.Parse(time.DateOnly, s), which is
+// midnight UTC): its year, month and day are read as is, never converted to
+// Mexico City time. Only now is converted.
+//
+// Adult fails closed: a zero dob or a dob after now's date is not adult.
+// Callers only call it when a dob was given; a missing dob is the caller's
+// decision, not an implicit pass.
 func Adult(dob, now time.Time) bool {
+	if dob.IsZero() {
+		return false
+	}
 	by, bm, bd := dob.Date()
 	ny, nm, nd := now.In(mexicoCity).Date()
 	age := ny - by
@@ -190,13 +336,16 @@ func MaskEmail(email string) string {
 	if at <= 0 {
 		return "***"
 	}
-	first := []rune(e[:at])[0]
+	first, _ := utf8.DecodeRuneInString(e)
 	return string(first) + "***" + e[at:]
 }
 
 // EmailHash is a stable log key for an email: the first 12 hex characters of
 // the SHA-256 of NormalizeEmail's output, or of the trimmed, lowercased input
 // when it does not normalize.
+//
+// It is a pseudonym, not anonymization: it is unsalted, so anyone holding a
+// candidate email can hash it and match the key. Treat it as personal data.
 func EmailHash(email string) string {
 	e, err := NormalizeEmail(email)
 	if err != nil {
