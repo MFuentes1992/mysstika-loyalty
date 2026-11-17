@@ -11,6 +11,29 @@ import "github.com/MFuentes1992/mysstika-loyalty"
 loyalty.TierFor(loyalty.FirstCycle) // "Nivel 1"
 ```
 
+## intake
+
+Enrollment intake rules, shared by the self-enrollment portal and teller enrollment so both accept the same input (`github.com/MFuentes1992/mysstika-loyalty/intake`):
+
+- `NormalizeEmail(s)`: trim + lowercase, `ErrInvalidEmail` unless it is a plain ASCII `local@domain.tld`: at most 254 bytes, local part 1–64 with no leading/trailing/doubled dot (`+` tags kept), ASCII domain labels of 1–63 letters/digits/hyphens, TLD of 2+ letters, and no whitespace, control or format characters (zero-width space) or ``<>()[]\,;:"``. Not RFC 5322.
+- `CleanName(s, blocked)` / `NewNameCleaner(blocked).Clean(s)`, in this order:
+  1. Drop invalid UTF-8 and control/format characters (NUL, zero-width space, soft hyphen); whitespace becomes a space.
+  2. Keep the first 200 runes; if the cut lands inside a word, drop that partial word too.
+  3. Replace HTML tags with a space, collapse whitespace.
+  4. Replace whole blocked words with `[redacted]`.
+  5. Cap at 50 runes on a word boundary, never splitting `[redacted]`. If not even the first word fits, hard-cut: only the first word may be cut, and only when the piece is not a blocked word or blocked-word prefix.
+  6. Drop a trailing unmatched opener (`(`, `[`, `"`, `“`, `«`) and the separators before it, so a name never ends in `Ana (`. An unmatched opener mid-string (`Ana (Luis`) is left as is; that is cosmetic and accepted.
+  - A word is a run of letters and marks; every other rune (including the apostrophes `'`, `’` and `ʼ`) is a separator and is kept (`Ana-badword` → `Ana-[redacted]`, `badword!` → `[redacted]!`). Substrings never match (`Badwordson` stays).
+  - Matching ignores case, fullwidth forms and all combining marks, but `ñ` stays distinct from `n`. Leetspeak (`b4dword`) and in-word splits (`bad_word`) are out of scope.
+  - Blocked entries must be single words; entries with a separator are ignored and listed by `Skipped()` so the service can log them.
+  - **The output is not HTML-safe.** Escape it wherever it is rendered.
+  - `FuzzClean` and `FuzzPad` check these invariants; plain `go test` runs only their seeds, `go test -fuzz=FuzzClean -fuzztime=30s ./intake` fuzzes.
+- `NormalizeCampaign(s)`: `none` when empty, the tag when it matches `^[a-z0-9-]{1,32}$`, otherwise `invalid`.
+- `Adult(dob, now)`: 18+ on `now`'s date in `America/Mexico_City` (embedded tzdata). Pass `dob` as a date-only value; Feb 29 birthdays are reached on Mar 1 in non-leap years. Fails closed: a zero or future `dob` is not adult, so callers only call it when a dob was given.
+- `MaskEmail(e)` and `EmailHash(e)`: log helpers (`j***@example.com`; 12 hex chars of an unsalted SHA-256, a pseudonym anyone with a candidate email can match, so treat it as personal data).
+
+The blocked-word list is never committed here: services load it from SSM and pass it in. Tests use made-up words only.
+
 Versioned with git tags (`vX.Y.Z`); consumers pin a tag in `go.mod`.
 
 Test fixtures are synthetic. This repo is public, so never commit real customer data.
