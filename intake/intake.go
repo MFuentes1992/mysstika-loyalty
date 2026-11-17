@@ -32,7 +32,9 @@ const (
 // like local@domain.tld. It is deliberately stricter and simpler than RFC 5322:
 //
 //   - valid UTF-8, at most 254 bytes, exactly one @
-//   - no whitespace, control characters or any of <>()[]\,;:"
+//   - ASCII only (local part and domain), so no Unicode format characters
+//     such as a zero-width space; no whitespace, control characters or any of
+//     <>()[]\,;:"
 //   - local part of 1–64 bytes with no leading, trailing or doubled dot
 //     (+ tags and inner dots are kept)
 //   - two or more domain labels of 1–63 ASCII letters, digits or hyphens, not
@@ -46,7 +48,8 @@ func NormalizeEmail(s string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 	for _, r := range e {
-		if unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune(emailSpecials, r) {
+		if r > unicode.MaxASCII || unicode.IsSpace(r) || unicode.IsControl(r) ||
+			unicode.Is(unicode.Cf, r) || strings.ContainsRune(emailSpecials, r) {
 			return "", ErrInvalidEmail
 		}
 	}
@@ -143,16 +146,19 @@ func CleanName(s string, blocked []string) string {
 
 // Clean returns a display name of at most MaxNameRunes runes:
 //
-//  1. drop invalid UTF-8 and keep the first MaxRawNameRunes runes;
+//  1. drop invalid UTF-8 and keep the first MaxRawNameRunes runes; when that
+//     cut lands inside a word, the kept part of that word is dropped too;
 //  2. replace each HTML tag with a space (a tag starts at < followed by a
 //     letter, / or !, and an unterminated one runs to the end), so a lone < or
 //     > is kept; turn whitespace into spaces, drop control and format
 //     characters, collapse spaces and trim;
 //  3. replace every whole word that matches a blocked word with Redacted;
-//  4. cap at MaxNameRunes on a word boundary.
+//  4. cap at MaxNameRunes on a word boundary;
+//  5. drop a trailing unmatched opener ( [ " “ « and the separators before
+//     it, so a name never ends in "Ana (".
 //
 // A word is a run of letters and combining marks. Every other rune
-// (punctuation, digits, emoji, _, spaces, hyphens, apostrophes) separates
+// (punctuation, digits, emoji, _, spaces, hyphens, apostrophes including ʼ) separates
 // words and is kept, so "Ana-badword" is "Ana-[redacted]" and "badword!" is
 // "[redacted]!". Matching ignores case, compatibility forms (fullwidth
 // letters) and accents, but ñ stays distinct from n. Substrings never match.
@@ -167,8 +173,16 @@ func CleanName(s string, blocked []string) string {
 // The result is not HTML-safe: escape it wherever it is rendered.
 func (c *NameCleaner) Clean(s string) string {
 	s = strings.ToValidUTF8(s, "")
-	if utf8.RuneCountInString(s) > MaxRawNameRunes {
-		s = string([]rune(s)[:MaxRawNameRunes])
+	if r := []rune(s); len(r) > MaxRawNameRunes {
+		kept := r[:MaxRawNameRunes]
+		if !isSeparator(r[MaxRawNameRunes]) {
+			// The cut is inside a word: drop its kept part too, so a prefix
+			// of a blocked word ("bad" of "badword") never survives.
+			for len(kept) > 0 && !isSeparator(kept[len(kept)-1]) {
+				kept = kept[:len(kept)-1]
+			}
+		}
+		s = string(kept)
 	}
 	s = htmlTag.ReplaceAllString(s, " ")
 	s = strings.Map(func(r rune) rune {
@@ -190,7 +204,30 @@ func (c *NameCleaner) Clean(s string) string {
 			}
 		}
 	}
-	return capTokens(toks)
+	return dropTrailingOpener(capTokens(toks))
+}
+
+const (
+	openers = "([\"\u201c\u00ab" // ( [ " “ «
+	closers = ")]\"\u201d\u00bb" // ) ] " ” »
+)
+
+// dropTrailingOpener removes an unmatched opener at the end of s, with the
+// separators before it, so a name never ends in "Ana (". A closing bracket or
+// quote before it is kept. An unmatched opener mid-string is left alone.
+func dropTrailingOpener(s string) string {
+	for {
+		r, size := utf8.DecodeLastRuneInString(s)
+		if size == 0 || !strings.ContainsRune(openers, r) {
+			return s
+		}
+		if r == '"' && strings.Count(s, `"`)%2 == 0 {
+			return s // closes an earlier "
+		}
+		s = strings.TrimRightFunc(s[:len(s)-size], func(r rune) bool {
+			return isSeparator(r) && !strings.ContainsRune(closers, r)
+		})
+	}
 }
 
 type token struct {
@@ -256,18 +293,20 @@ func capTokens(toks []token) string {
 	return strings.TrimSpace(b.String())
 }
 
+// isSeparator reports whether r separates words. U+02BC (ʼ) is a modifier
+// letter but is typed as an apostrophe, so it separates too.
 func isSeparator(r rune) bool {
-	return !unicode.IsLetter(r) && !unicode.IsMark(r)
+	return r == '\u02bc' || !unicode.IsLetter(r) && !unicode.IsMark(r)
 }
 
-// fold lowercases w and, after NFKD, drops nonspacing marks except the tilde
-// of ñ, so "Zórglé" folds to "zorgle", "ｂａｄ" to "bad" and "Peña" to "peña"
+// fold lowercases w and, after NFKD, drops every combining mark (Mn, Mc, Me)
+// except the tilde of ñ, so "Zórglé" folds to "zorgle", "ｂａｄ" to "bad" and "Peña" to "peña"
 // (not "pena").
 func fold(w string) string {
 	var b strings.Builder
 	var prev rune
 	for _, r := range norm.NFKD.String(w) {
-		if unicode.Is(unicode.Mn, r) && !(r == '̃' && (prev == 'n' || prev == 'N')) {
+		if unicode.IsMark(r) && !(r == '\u0303' && (prev == 'n' || prev == 'N')) {
 			continue
 		}
 		b.WriteRune(r)

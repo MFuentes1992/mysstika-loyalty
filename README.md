@@ -15,10 +15,16 @@ loyalty.TierFor(loyalty.FirstCycle) // "Nivel 1"
 
 Enrollment intake rules, shared by the self-enrollment portal and teller enrollment so both accept the same input (`github.com/MFuentes1992/mysstika-loyalty/intake`):
 
-- `NormalizeEmail(s)`: trim + lowercase, `ErrInvalidEmail` unless it is a plain `local@domain.tld`: at most 254 bytes, local part 1–64 with no leading/trailing/doubled dot (`+` tags kept), ASCII domain labels of 1–63 letters/digits/hyphens, TLD of 2+ letters, and no whitespace, control characters or ``<>()[]\,;:"``. Not RFC 5322.
-- `CleanName(s, blocked)` / `NewNameCleaner(blocked).Clean(s)`: bound the raw input to 200 runes, drop invalid UTF-8, replace HTML tags with a space, drop control characters, collapse whitespace, replace whole blocked words with `[redacted]`, then cap at 50 runes on a word boundary (never splitting `[redacted]`).
-  - A word is a run of letters and marks; every other rune is a separator and is kept (`Ana-badword` → `Ana-[redacted]`, `badword!` → `[redacted]!`). Substrings never match (`Badwordson` stays).
-  - Matching ignores case, fullwidth forms and accents, but `ñ` stays distinct from `n`. Leetspeak (`b4dword`) and in-word splits (`bad_word`) are out of scope.
+- `NormalizeEmail(s)`: trim + lowercase, `ErrInvalidEmail` unless it is a plain ASCII `local@domain.tld`: at most 254 bytes, local part 1–64 with no leading/trailing/doubled dot (`+` tags kept), ASCII domain labels of 1–63 letters/digits/hyphens, TLD of 2+ letters, and no whitespace, control or format characters (zero-width space) or ``<>()[]\,;:"``. Not RFC 5322.
+- `CleanName(s, blocked)` / `NewNameCleaner(blocked).Clean(s)`, in this order:
+  1. Drop invalid UTF-8.
+  2. Keep the first 200 runes; if the cut lands inside a word, drop that partial word too.
+  3. Replace HTML tags with a space, drop control and format characters, collapse whitespace.
+  4. Replace whole blocked words with `[redacted]`.
+  5. Cap at 50 runes on a word boundary (never splitting `[redacted]`).
+  6. Drop a trailing unmatched opener (`(`, `[`, `"`, `“`, `«`) and the separators before it, so a name never ends in `Ana (`.
+  - A word is a run of letters and marks; every other rune (including the apostrophes `'`, `’` and `ʼ`) is a separator and is kept (`Ana-badword` → `Ana-[redacted]`, `badword!` → `[redacted]!`). Substrings never match (`Badwordson` stays).
+  - Matching ignores case, fullwidth forms and all combining marks, but `ñ` stays distinct from `n`. Leetspeak (`b4dword`) and in-word splits (`bad_word`) are out of scope.
   - Blocked entries must be single words; entries with a separator are ignored and listed by `Skipped()` so the service can log them.
   - **The output is not HTML-safe.** Escape it wherever it is rendered.
 - `NormalizeCampaign(s)`: `none` when empty, the tag when it matches `^[a-z0-9-]{1,32}$`, otherwise `invalid`.
