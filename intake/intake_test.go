@@ -49,6 +49,11 @@ func TestNormalizeEmail(t *testing.T) {
 		{in: "ja\x00ne@example.com", wantErr: true}, // control character
 		{in: "ja\x7fne@example.com", wantErr: true},
 		{in: "jan\xffe@example.com", wantErr: true}, // invalid UTF-8
+		{in: "jane\u200b@gmail.com", wantErr: true}, // zero-width space (Cf)
+		{in: "ja\u00adne@gmail.com", wantErr: true}, // soft hyphen (Cf)
+		{in: "jane@gmail.com\ufeff", wantErr: true}, // BOM (Cf)
+		{in: "ñandú@example.mx", wantErr: true},     // non-ASCII local part
+		{in: "jané@example.com", wantErr: true},
 		{in: "<jane>@example.com", wantErr: true},
 		{in: "jane(x)@example.com", wantErr: true},
 		{in: "jane[x]@example.com", wantErr: true},
@@ -57,19 +62,19 @@ func TestNormalizeEmail(t *testing.T) {
 		{in: "jane;x@example.com", wantErr: true},
 		{in: "jane:x@example.com", wantErr: true},
 		{in: `"jane"@example.com`, wantErr: true},
-		{in: local64 + "l@example.com", wantErr: true},                              // local 65
-		{in: local64 + "@" + domain189[:len(domain189)-4] + "c.com", wantErr: true}, // 255 total
-		{in: ".jane@example.com", wantErr: true},                                    // leading dot
-		{in: "jane.@example.com", wantErr: true},                                    // trailing dot
-		{in: "ja..ne@example.com", wantErr: true},                                   // doubled dot
-		{in: "jane@" + label63 + "d.com", wantErr: true},                            // label 64
-		{in: "jane@-example.com", wantErr: true},                                    // label starts with -
-		{in: "jane@example-.com", wantErr: true},                                    // label ends with -
-		{in: "jane@ex_ample.com", wantErr: true},                                    // _ in domain
-		{in: "jane@exámple.com", wantErr: true},                                     // non-ASCII domain
-		{in: "jane@example.c", wantErr: true},                                       // 1-letter TLD
-		{in: "jane@example.c0m", wantErr: true},                                     // digit in TLD
-		{in: "jane@example.123", wantErr: true},                                     // numeric TLD
+		{in: local64 + "l@example.com", wantErr: true},                                                      // local 65
+		{in: local64 + "@" + domain189[:len(domain189)-4] + "c.com", wantErr: true},                         // 255 total
+		{in: ".jane@example.com", wantErr: true},                                                            // leading dot
+		{in: "jane.@example.com", wantErr: true},                                                            // trailing dot
+		{in: "ja..ne@example.com", wantErr: true},                                                           // doubled dot
+		{in: "jane@" + label63 + "d.com", wantErr: true},                                                    // label 64
+		{in: "jane@-example.com", wantErr: true},                                                            // label starts with -
+		{in: "jane@example-.com", wantErr: true},                                                            // label ends with -
+		{in: "jane@ex_ample.com", wantErr: true},                                                            // _ in domain
+		{in: "jane@exámple.com", wantErr: true},                                                             // non-ASCII domain
+		{in: "jane@example.c", wantErr: true},                                                               // 1-letter TLD
+		{in: "jane@example.c0m", wantErr: true},                                                             // digit in TLD
+		{in: "jane@example.123", wantErr: true},                                                             // numeric TLD
 		{in: "jane@" + strings.Repeat("e", 10) + "." + strings.Repeat("m", 3), want: "jane@eeeeeeeeee.mmm"}, // control: valid
 	}
 	for _, c := range cases {
@@ -126,6 +131,9 @@ func TestCleanName(t *testing.T) {
 		{"hyphen separator kept", "Ana-badword", "Ana-[redacted]"},
 		{"apostrophe separator kept", "O'badword", "O'[redacted]"},
 		{"typographic apostrophe separator kept", "O’badword", "O’[redacted]"},
+		{"modifier letter apostrophe separator kept", "O\u02bczorgle", "O\u02bc[redacted]"},
+		{"enclosing mark folded", "zorgle\u20dd", "[redacted]"},
+		{"spacing mark folded", "Ana zorgle\u0903", "Ana [redacted]"},
 		{"trailing punctuation", "badword!", "[redacted]!"},
 		{"parentheses", "(badword)", "([redacted])"},
 		{"slash", "Ana/badword", "Ana/[redacted]"},
@@ -154,8 +162,30 @@ func TestCleanName(t *testing.T) {
 		{"exactly 50 untouched", a(20) + " " + a(29), a(20) + " " + a(29)},
 
 		// Raw input is bounded to 200 runes before anything else.
-		{"raw bound before cleaning", strings.Repeat(" ", 195) + "Ana Luisa", "Ana L"},
-		{"raw bound counts tags", strings.Repeat("<b>", 66) + "Ana Luisa", "An"},
+		// The bound never leaves a partial word: if the cut lands inside a word,
+		// that word is dropped too.
+		{"raw bound drops partial word", strings.Repeat(" ", 195) + "Ana Luisa", "Ana"},
+		{"raw bound counts tags", strings.Repeat("<b>", 66) + "Ana Luisa", ""},
+		{"raw bound no partial blocked word", strings.Repeat(" ", 197) + "badword", ""},
+		{"raw bound no partial word after tags", strings.Repeat("<b>", 66) + "zorgle!!", ""},
+		{"raw bound no partial word after zero-width", strings.Repeat("\u200b", 196) + "zorgleta", ""},
+		{"raw bound cut word is not a blocked word", strings.Repeat(" ", 194) + "zorgleta", ""},
+		{"raw bound cut on a separator keeps the word", strings.Repeat(" ", 194) + "Ana Lu ruiz", "Ana Lu"},
+		{"raw bound exactly 200 untouched", strings.Repeat(" ", 191) + "Ana Luisa", "Ana Luisa"},
+		{"raw bound word ending at the cut kept", strings.Repeat(" ", 191) + "Ana Luisa!!", "Ana Luisa"},
+
+		// No trailing unmatched opener.
+		{"trailing paren dropped", "Ana (", "Ana"},
+		{"trailing bracket dropped", "Ana María [", "Ana María"},
+		{"trailing ascii quote dropped", `Ana "`, "Ana"},
+		{"trailing curly quote dropped", "Ana \u201c", "Ana"},
+		{"trailing guillemet dropped", "Ana \u00ab", "Ana"},
+		{"trailing opener with separators before it", "Ana, - (", "Ana"},
+		{"trailing opener left by a tag", "Ana (<b>", "Ana"},
+		{"matched ascii quotes kept", `"Ana"`, `"Ana"`},
+		{"matched curly quotes kept", "\u201cAna\u201d", "\u201cAna\u201d"},
+		{"unmatched opener mid-string kept", "Ana (Luis", "Ana (Luis"},
+		{"unmatched curly quote mid-string kept", "Ana \u201cLuis", "Ana \u201cLuis"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
