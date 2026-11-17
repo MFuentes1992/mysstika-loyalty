@@ -146,16 +146,18 @@ func CleanName(s string, blocked []string) string {
 
 // Clean returns a display name of at most MaxNameRunes runes:
 //
-//  1. drop invalid UTF-8 and keep the first MaxRawNameRunes runes; when that
-//     cut lands inside a word, the kept part of that word is dropped too;
-//  2. replace each HTML tag with a space (a tag starts at < followed by a
+//  1. drop invalid UTF-8 and control and format characters (NUL, zero-width
+//     space, soft hyphen...); turn whitespace into spaces;
+//  2. keep the first MaxRawNameRunes runes; when that cut lands inside a
+//     word, the kept part of that word is dropped too;
+//  3. replace each HTML tag with a space (a tag starts at < followed by a
 //     letter, / or !, and an unterminated one runs to the end), so a lone < or
-//     > is kept; turn whitespace into spaces, drop control and format
-//     characters, collapse spaces and trim;
-//  3. replace every whole word that matches a blocked word with Redacted;
-//  4. cap at MaxNameRunes on a word boundary;
-//  5. drop a trailing unmatched opener ( [ " “ « and the separators before
-//     it, so a name never ends in "Ana (".
+//     > is kept; collapse spaces and trim;
+//  4. replace every whole word that matches a blocked word with Redacted;
+//  5. cap at MaxNameRunes on a word boundary;
+//  6. drop a trailing unmatched opener ( [ " “ « and the separators before
+//     it, so a name never ends in "Ana (". An unmatched opener mid-string
+//     ("Ana (Luis") is left alone: that is cosmetic and accepted.
 //
 // A word is a run of letters and combining marks. Every other rune
 // (punctuation, digits, emoji, _, spaces, hyphens, apostrophes including ʼ) separates
@@ -167,12 +169,26 @@ func CleanName(s string, blocked []string) string {
 //
 // The cap runs after redaction so the result always fits MaxNameRunes and a
 // Redacted marker is never split. It keeps whole words up to the last word
-// that fits; when not even the first word fits, it hard-cuts, but never inside
-// a Redacted marker.
+// that fits. When not even the first word fits, it hard-cuts: separators may
+// be cut anywhere, but a word is cut only when it is the first token and the
+// piece is neither a blocked word nor a blocked-word prefix; otherwise the
+// output stops before that word.
 //
 // The result is not HTML-safe: escape it wherever it is rendered.
 func (c *NameCleaner) Clean(s string) string {
 	s = strings.ToValidUTF8(s, "")
+	// Strip control and format characters (zero-width space, soft hyphen,
+	// NUL...) before the raw cut, so they neither count toward it nor hide a
+	// word from it. Whitespace becomes a plain space.
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, s)
 	if r := []rune(s); len(r) > MaxRawNameRunes {
 		kept := r[:MaxRawNameRunes]
 		if !isSeparator(r[MaxRawNameRunes]) {
@@ -185,15 +201,6 @@ func (c *NameCleaner) Clean(s string) string {
 		s = string(kept)
 	}
 	s = htmlTag.ReplaceAllString(s, " ")
-	s = strings.Map(func(r rune) rune {
-		switch {
-		case unicode.IsSpace(r):
-			return ' '
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
-			return -1
-		}
-		return r
-	}, s)
 	s = strings.Join(strings.Fields(s), " ")
 
 	toks := tokenize(s)
@@ -204,7 +211,7 @@ func (c *NameCleaner) Clean(s string) string {
 			}
 		}
 	}
-	return dropTrailingOpener(capTokens(toks))
+	return dropTrailingOpener(c.capTokens(toks))
 }
 
 const (
@@ -255,7 +262,7 @@ func tokenize(s string) []token {
 	return toks
 }
 
-func capTokens(toks []token) string {
+func (c *NameCleaner) capTokens(toks []token) string {
 	total, lastWordEnd := 0, -1
 	for i, t := range toks {
 		total += utf8.RuneCountInString(t.text)
@@ -276,17 +283,20 @@ func capTokens(toks []token) string {
 		}
 		return b.String()
 	}
-	// Not even the first word fits: hard-cut, never inside Redacted.
+	// Not even the first word fits: hard-cut. Separators may be cut anywhere.
+	// A word is cut only when it is the first token and the piece is neither a
+	// blocked word nor a blocked-word prefix; otherwise stop before it.
 	left := MaxNameRunes
-	for _, t := range toks {
+	for i, t := range toks {
 		n := utf8.RuneCountInString(t.text)
 		if n <= left {
 			b.WriteString(t.text)
 			left -= n
 			continue
 		}
-		if !t.redacted {
-			b.WriteString(string([]rune(t.text)[:left]))
+		piece := string([]rune(t.text)[:left])
+		if !t.word || (i == 0 && !t.redacted && !c.blockedPrefix(piece)) {
+			b.WriteString(piece)
 		}
 		break
 	}
@@ -295,6 +305,18 @@ func capTokens(toks []token) string {
 
 // isSeparator reports whether r separates words. U+02BC (ʼ) is a modifier
 // letter but is typed as an apostrophe, so it separates too.
+// blockedPrefix reports whether w, folded, is a blocked word or the start of
+// one.
+func (c *NameCleaner) blockedPrefix(w string) bool {
+	f := fold(w)
+	for b := range c.blocked {
+		if strings.HasPrefix(b, f) {
+			return true
+		}
+	}
+	return false
+}
+
 func isSeparator(r rune) bool {
 	return r == '\u02bc' || !unicode.IsLetter(r) && !unicode.IsMark(r)
 }
