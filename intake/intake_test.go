@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -159,6 +161,13 @@ func TestCleanName(t *testing.T) {
 		{"redacted word that fits is kept", a(39) + " badword", a(39) + " [redacted]"},
 		{"many blocked words", "badword badword badword badword badword", "[redacted] [redacted] [redacted] [redacted]"},
 		{"hard cut never splits redacted", strings.Repeat("!", 45) + "badword", strings.Repeat("!", 45)},
+		// The hard cut only cuts into the first token, and never leaves a
+		// blocked word or a blocked-word prefix.
+		{"hard cut stops before a later word", strings.Repeat("!", 44) + "zorgleta", strings.Repeat("!", 44)},
+		{"hard cut stops before a word after emoji", strings.Repeat("😀", 44) + "zorgleson", strings.Repeat("😀", 44)},
+		{"hard cut stops before a word after digits", strings.Repeat("1", 43) + "badwordy", strings.Repeat("1", 43)},
+		{"hard cut stops before a blocked prefix", strings.Repeat("1", 40) + " 222badwordson", strings.Repeat("1", 40) + " 222"},
+		{"hard cut long first word (substrings never match)", "badwordbadwordbadwordbadwordbadwordbadwordbadwordbadword", "badwordbadwordbadwordbadwordbadwordbadwordbadwordb"},
 		{"exactly 50 untouched", a(20) + " " + a(29), a(20) + " " + a(29)},
 
 		// Raw input is bounded to 200 runes before anything else.
@@ -168,7 +177,13 @@ func TestCleanName(t *testing.T) {
 		{"raw bound counts tags", strings.Repeat("<b>", 66) + "Ana Luisa", ""},
 		{"raw bound no partial blocked word", strings.Repeat(" ", 197) + "badword", ""},
 		{"raw bound no partial word after tags", strings.Repeat("<b>", 66) + "zorgle!!", ""},
-		{"raw bound no partial word after zero-width", strings.Repeat("\u200b", 196) + "zorgleta", ""},
+		// Zero-width, control and soft-hyphen characters are stripped before
+		// the raw cut, so they neither count toward it nor hide a partial word.
+		{"raw bound ignores zero-width padding", strings.Repeat("\u200b", 196) + "zorgleta", "zorgleta"},
+		{"raw bound zero-width inside a word", strings.Repeat(" ", 197) + "bad\u200bword", ""},
+		{"raw bound NUL inside a word", strings.Repeat(" ", 197) + "bad\x00word", ""},
+		{"raw bound soft hyphen inside a word", strings.Repeat(" ", 197) + "bad\u00adword", ""},
+		{"raw bound zero-width near the cut", strings.Repeat(" ", 196) + "zo\u200brgle", ""},
 		{"raw bound cut word is not a blocked word", strings.Repeat(" ", 194) + "zorgleta", ""},
 		{"raw bound cut on a separator keeps the word", strings.Repeat(" ", 194) + "Ana Lu ruiz", "Ana Lu"},
 		{"raw bound exactly 200 untouched", strings.Repeat(" ", 191) + "Ana Luisa", "Ana Luisa"},
@@ -234,6 +249,26 @@ func TestCleanNameNeverExceedsCap(t *testing.T) {
 		}
 		if strings.Contains(strings.ReplaceAll(got, Redacted, ""), "[redac") {
 			t.Errorf("Clean(%.20q...) = %q splits %s", in, got, Redacted)
+		}
+	}
+}
+
+func TestCleanNameHardCutFirstWordAgainstLongEntries(t *testing.T) {
+	a := func(n int) string { return strings.Repeat("a", n) }
+	cases := []struct {
+		blocked []string
+		in      string
+		want    string
+	}{
+		{[]string{a(50)}, a(60), ""},       // the cut piece is a blocked word
+		{[]string{a(55)}, a(60), ""},       // the cut piece is a blocked-word prefix
+		{[]string{"Á" + a(54)}, a(60), ""}, // ...after folding
+		{[]string{a(49)}, a(60), a(50)},    // neither: cut as usual
+		{[]string{a(55)}, "b" + a(59), "b" + a(49)},
+	}
+	for _, c := range cases {
+		if got := NewNameCleaner(c.blocked).Clean(c.in); got != c.want {
+			t.Errorf("blocked %.8q…: Clean(%.8q…) = %q, want %q", c.blocked[0], c.in, got, c.want)
 		}
 	}
 }
@@ -378,4 +413,124 @@ func TestEmailHash(t *testing.T) {
 	if got := EmailHash("x"); len(got) != 12 {
 		t.Errorf("len = %d, want 12", len(got))
 	}
+}
+
+// reviewedInputs seed the fuzz tests: every input raised in review.
+var reviewedInputs = []string{
+	"Ana", "Ana-badword", "O'badword", "O\u02bczorgle", "badword!", "(badword)", "Ana/badword",
+	"badword1", "badword😀", "Badwordson", "Mybadword", "b4dword", "bad_word", "Zórglé López",
+	"Ana ｂａｄｗｏｒｄ", "zorgle\u20dd", "Año Peña", "Ana<br>María", "Ana <3 y Luis >", "Ana <b onclick=x",
+	"Ana (", `Ana "`, "Ana \u201c", "Ana (Luis", "An\xffa Mar\xc3ía",
+	strings.Repeat("a", 42) + " badwordson",
+	strings.Repeat("a", 42) + " badword",
+	"badword badword badword badword badword",
+	strings.Repeat("!", 45) + "badword",
+	strings.Repeat("!", 44) + "zorgleta",
+	strings.Repeat("😀", 44) + "zorgleson",
+	strings.Repeat("1", 43) + "badwordy",
+	strings.Repeat("1", 40) + " 222badwordson",
+	strings.Repeat(" ", 197) + "badword",
+	strings.Repeat(" ", 197) + "bad\u200bword",
+	strings.Repeat(" ", 197) + "bad\x00word",
+	strings.Repeat(" ", 197) + "bad\u00adword",
+	strings.Repeat(" ", 196) + "zo\u200brgle",
+	strings.Repeat(" ", 194) + "zorgleta",
+	strings.Repeat("<b>", 66) + "zorgle!!",
+	strings.Repeat("\u200b", 196) + "zorgleta",
+	strings.Repeat("a", 60),
+	strings.Repeat("x", 5000),
+}
+
+// wordsOf returns the words (runs of letters and marks) of s, in order.
+func wordsOf(s string) []string {
+	var words []string
+	for _, tok := range tokenize(s) {
+		if tok.word {
+			words = append(words, tok.text)
+		}
+	}
+	return words
+}
+
+func FuzzClean(f *testing.F) {
+	for _, in := range reviewedInputs {
+		f.Add(in)
+	}
+	c := NewNameCleaner(blocked)
+	folded := []string{"badword", "ofensivo", "zorgle"}
+
+	f.Fuzz(func(t *testing.T, in string) {
+		out := c.Clean(in)
+		if n := utf8.RuneCountInString(out); n > MaxNameRunes {
+			t.Fatalf("Clean(%q) has %d runes", in, n)
+		}
+		if !utf8.ValidString(out) {
+			t.Fatalf("Clean(%q) = %q is not valid UTF-8", in, out)
+		}
+		if !strings.ContainsAny(in, "[]") && strings.ContainsAny(strings.ReplaceAll(out, Redacted, ""), "[]") {
+			t.Fatalf("Clean(%q) = %q splits %s", in, out, Redacted)
+		}
+		for _, w := range wordsOf(out) {
+			if _, ok := c.blocked[fold(w)]; ok {
+				t.Fatalf("Clean(%q) = %q keeps blocked word %q", in, out, w)
+			}
+		}
+		// A word at the end of the output that is not a whole word of the
+		// input was cut: it must not be a blocked-word prefix.
+		ws := wordsOf(out)
+		if len(ws) == 0 || isSeparator(lastRune(out)) {
+			return
+		}
+		last := ws[len(ws)-1]
+		for _, w := range wordsOf(strings.Map(dropCcCf, strings.ToValidUTF8(in, ""))) {
+			if w == last {
+				return
+			}
+		}
+		for _, b := range folded {
+			if strings.HasPrefix(b, fold(last)) {
+				t.Fatalf("Clean(%q) = %q ends in cut blocked-word prefix %q", in, out, last)
+			}
+		}
+	})
+}
+
+func FuzzPad(f *testing.F) {
+	for _, in := range reviewedInputs {
+		for pad := 0; pad < 6; pad++ {
+			f.Add(in, uint8(pad), uint8(190))
+		}
+	}
+	c := NewNameCleaner(blocked)
+	pads := []string{" ", "\u200b", "\x00", "<b>", "\u00ad", "\t"}
+
+	f.Fuzz(func(t *testing.T, in string, kind, n uint8) {
+		pad := pads[int(kind)%len(pads)]
+		padded := strings.Repeat(pad, int(n)) + in
+		want, got := wordsOf(c.Clean(in)), wordsOf(c.Clean(padded))
+		switch pad {
+		case "\u200b", "\x00", "\u00ad":
+			// Stripped before the raw cut: no effect at all.
+			if !slices.Equal(got, want) {
+				t.Fatalf("%d×%q padding changed words: %q, want %q", n, pad, got, want)
+			}
+		default:
+			// Counted by the raw cut: may drop trailing words, never change one.
+			if len(got) > len(want) || !slices.Equal(got, want[:len(got)]) {
+				t.Fatalf("%d×%q padding changed words: %q, want a prefix of %q", n, pad, got, want)
+			}
+		}
+	})
+}
+
+func lastRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
+}
+
+func dropCcCf(r rune) rune {
+	if unicode.IsControl(r) && !unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+		return -1
+	}
+	return r
 }
